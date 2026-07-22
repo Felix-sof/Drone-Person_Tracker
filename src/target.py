@@ -40,3 +40,4 @@ class Target:
         self.last_pose_result = None
         self.last_emotion = None
         self.locked_score = None
+        self.last_distance_m = None

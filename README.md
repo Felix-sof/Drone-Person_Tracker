@@ -118,6 +118,32 @@ görüntüsü/VisDrone gibi veri setleriyle test ederken açman önerilir.
 - `TILE_OVERLAP_RATIO`: parçalar arası örtüşme oranı (kenardaki nesnelerin bölünmemesi için)
 - `TILING_NMS_IOU_THRESHOLD`: örtüşen bölgelerdeki tekrar tespitleri birleştirme eşiği
 
+## Mesafe Tahmini
+
+`config.py` içinde `ENABLE_DISTANCE_ESTIMATION = True` (varsayılan) ile her hedef için kabaca
+bir mesafe tahmini ("~15.3 M") HUD panelinde gösteriliyor. Yöntem: klasik pinhole kamera
+yaklaşımı -- hedefin ekrandaki piksel yüksekliği ile kameranın dikey görüş açısı (FOV) ve
+varsayılan bir insan boyu (1.7m) kullanılarak mesafe hesaplanıyor.
+
+**Önemli:** `CAMERA_VERTICAL_FOV_DEG` değerini **gerçek kameranıza göre ayarlaman gerekiyor**
+-- yanlış FOV, gerçekçi görünen ama yanlış bir mesafe üretir, bunu sessizce yapar. Ayrıca bu
+yöntem hedefin **dik durduğunu ve tam göründüğünü** varsayıyor; çömelmiş/oturan/kısmen
+görünen biri için mesafe olduğundan uzak görünür (çünkü görünen boy küçülür, ama sebep
+mesafe değil poz).
+
+## Isı Görüşlü (Termal) Kamera Desteği
+
+Video giriş katmanı (`app/main.py --video`) `cv2.VideoCapture`'ın anladığı her kaynağı kabul
+ediyor -- bu, UVC üzerinden standart bir webcam gibi görünen bir termal kamerayı da kapsıyor,
+yani I/O seviyesinde ekstra kod değişikliği gerekmeden bağlanabilir. **Ancak** çalışmayan kısım
+şu: bu projedeki her tespit/pose/Re-ID modeli sıradan RGB görüntülerle eğitilmiş. Termal
+karelerde insanlar ayırt edici özelliği olmayan parlak lekeler gibi görünüyor (kıyafet
+rengi/dokusu yok), bu da hazır RGB modellerin doğruluğunu ölçülebilir şekilde düşürüyor
+(Teledyne FLIR ADAS gibi veri setlerinde yayınlanmış sonuçlar bunu gösteriyor). Gerçek termal
+desteği eklemek bir config ayarı değil, bir **model eğitimi projesi** (örn. YOLO'yu termal bir
+veri setinde fine-tune etmek) -- şu an için uygulanmadı, gelecekteki bir yön olarak not
+düşülüyor.
+
 ## Bilinen Sınırlamalar / Sonraki Adımlar
 
 - **Gerçek drone feed'i**: `cv2.VideoCapture(CAMERA_INDEX)` yerine bir RTSP stream URL'i
@@ -125,3 +151,5 @@ görüntüsü/VisDrone gibi veri setleriyle test ederken açman önerilir.
   hem yerel video dosyalarını hem de RTSP/HTTP stream URL'lerini destekliyor.
 - **Çoklu benzer kişi**: Aynı renk kıyafeti giyen başka biri varsa yanlış eşleşme riski
   var; `REID_MATCH_THRESHOLD` ayarı ve/veya ek özellik (yürüyüş biçimi vb.) gerekebilir.
+- **Termal kamera**: Yukarıda açıklandığı gibi, I/O seviyesinde destekleniyor ama model
+  doğruluğu için termal-özel eğitim gerekiyor.
