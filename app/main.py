@@ -43,6 +43,7 @@ from config import (
     ROTATE_FRAME,
     VIDEO_PROCESS_EVERY_N_FRAMES,
 )
+from src.config_validation import validate_config, ConfigError
 from src.pipeline import DronePersonTrackingPipeline
 
 _ROTATE_CODES = {
@@ -82,6 +83,12 @@ def _setup_window(frame_shape):
 
 
 def main():
+    try:
+        validate_config()
+    except ConfigError as e:
+        print(f"[CONFIG ERROR] {e}")
+        sys.exit(1)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--reference", type=str, default=None,
                          help="Path to a reference photo of a person to track "

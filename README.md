@@ -1,17 +1,3 @@
-# Drone Person Tracker (Prototype)
-
-Referans bir fotoğraftan kişiyi tanıyıp canlı kamera akışında bulan ve takip eden bir
-görüntü işleme sistemi. Arama-kurtarma senaryosu için tasarlandı: "kayıp kişinin
-fotoğrafını yükle, sistem onu havadan bulup takip etsin."
-
-## Mimari
-
-```
-Referans Fotoğraf ──► Person Detection ──► Re-ID Embedding ──► Referans Vektörü
-                                                                       │
-Canlı Kare ──► Ego-Motion Compensation ──► Person Detection ──► Re-ID Match ──► Tracker
-```
-
 ### Neden Ego-Motion Compensation?
 
 Drone hiçbir zaman tam sabit durmuyor (rüzgar, titreşim, uçuş hareketi). Bu yüzden ham
@@ -69,8 +55,11 @@ içinde başka bir hedef aynı kutuyu tekrar sahiplenemiyor -- bu da çift sayı
 | `src/posture.py` | Oturma/kalkma geçişini zaman içinde takip etme |
 | `src/pose_analysis.py` | Uzuv görünürlüğü, el yanında nesne, oturma tespiti, vücut bölümü kutuları |
 | `src/emotion.py` | Yüz ifadesi analizi (DeepFace, FER2013 tabanlı) |
+| `src/distance.py` | Pinhole kamera yaklaşımıyla hedefe kabaca mesafe tahmini |
+| `src/config_validation.py` | Uygulama başlamadan önce `config.py` değerlerinin mantıklı aralıkta olup olmadığını kontrol eder |
 | `src/pipeline.py` | Çoklu hedef orkestrasyonu -- paylaşımlı tespit, hedef başına Re-ID/tracking/analiz |
 | `app/main.py` | Webcam/video üzerinden çalışan canlı demo, çoklu hedef kontrolleri |
+| `tests/test_distance.py` | `src/distance.py` için birim testler |
 
 ### Re-ID Backend Seçimi
 
@@ -144,6 +133,26 @@ desteği eklemek bir config ayarı değil, bir **model eğitimi projesi** (örn.
 veri setinde fine-tune etmek) -- şu an için uygulanmadı, gelecekteki bir yön olarak not
 düşülüyor.
 
+## Config Validasyonu ve Testler
+
+Uygulama başlamadan önce `src/config_validation.py` içindeki `validate_config()`
+fonksiyonu çalışıyor ve `config.py`'deki kritik ayarların (FOV açısı, Re-ID eşikleri,
+tiling ayarları vb.) mantıklı aralıkta olup olmadığını kontrol ediyor. Örneğin
+`CAMERA_VERTICAL_FOV_DEG` fiziksel olarak imkansız bir değere (0 veya 180+) ayarlanmışsa,
+uygulama sessizce yanlış mesafe üretmek yerine açık bir `[CONFIG ERROR]` mesajıyla
+başlamayı reddediyor.
+
+Ayrıca `tests/` klasöründe `pytest` ile çalışan birim testler var (şu an
+`src/distance.py` için). Çalıştırmak için:
+
+```bash
+pip install pytest
+pytest tests/ -v
+```
+
+Proje kökündeki `pytest.ini` dosyası (`pythonpath = .`), testlerin `src/` ve `app/`
+paketlerini doğru şekilde import edebilmesini sağlıyor.
+
 ## Bilinen Sınırlamalar / Sonraki Adımlar
 
 - **Gerçek drone feed'i**: `cv2.VideoCapture(CAMERA_INDEX)` yerine bir RTSP stream URL'i
@@ -153,3 +162,5 @@ düşülüyor.
   var; `REID_MATCH_THRESHOLD` ayarı ve/veya ek özellik (yürüyüş biçimi vb.) gerekebilir.
 - **Termal kamera**: Yukarıda açıklandığı gibi, I/O seviyesinde destekleniyor ama model
   doğruluğu için termal-özel eğitim gerekiyor.
+- **Test kapsamı**: Şu an sadece `src/distance.py` için birim test var; diğer
+  modüller (tracker, Re-ID, pose analysis) henüz test edilmiyor.
