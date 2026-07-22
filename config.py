@@ -200,7 +200,39 @@ ROTATE_FRAME = None
 # per-frame analysis takes longer than the video's own frame interval --
 # this trades temporal resolution for wall-clock speed instead of just
 # playing slower than the source video. 0 = analyze every frame (most
-# accurate, but can feel like slow motion on CPU, especially with several
+# # accurate, but can feel like slow motion on CPU, especially with several
 # targets). Raise this (2-4) for noticeably smoother playback; the tracked
 # boxes update less often but the video itself plays back near real-time.
 VIDEO_PROCESS_EVERY_N_FRAMES = 2
+
+# --- Distance estimation ---
+# Rough monocular distance estimate using the classic pinhole-camera
+# relationship between a target's apparent (pixel) height and its assumed
+# real-world height. This assumes the target is standing roughly upright
+# and fully visible -- crouching, sitting, or partially occluded targets
+# will read as farther away than they really are (their apparent height
+# shrinks for reasons other than distance).
+#
+# You MUST set CAMERA_VERTICAL_FOV_DEG to match your actual camera/drone --
+# the wrong FOV silently produces a wrong-but-plausible-looking number.
+# Check your drone/camera spec sheet for its vertical field of view; if
+# only the diagonal FOV is listed, this default is a reasonable placeholder
+# for common consumer drone cameras but WILL be off for yours specifically.
+ENABLE_DISTANCE_ESTIMATION = True
+CAMERA_VERTICAL_FOV_DEG = 55.0
+ASSUMED_PERSON_HEIGHT_M = 1.7
+DISTANCE_ESTIMATION_INTERVAL = 5   # frames; cheap (pure math), no need every frame
+
+# --- Thermal / infrared camera support ---
+# The video input layer (app/main.py --video) already accepts ANY source
+# cv2.VideoCapture understands, including a thermal camera exposed as a
+# standard UVC webcam -- so plugging one in works at the I/O level with no
+# code changes. What does NOT work out of the box: every detection/pose/
+# Re-ID model in this project is trained on ordinary RGB imagery. Thermal
+# frames show people as undifferentiated bright blobs (no clothing color/
+# texture), which measurably degrades off-the-shelf RGB-trained model
+# accuracy -- published results on datasets like Teledyne FLIR ADAS show
+# meaningful accuracy drops without thermal-specific fine-tuning. Adding
+# real thermal support is a model-training project (e.g. fine-tuning YOLO
+# on a thermal dataset), not a config flag -- noted here as a known future
+# direction rather than implemented.

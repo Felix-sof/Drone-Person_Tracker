@@ -1,3 +1,4 @@
+# TEST12345
 """
 Orchestrates the full flow, frame by frame, for MULTIPLE simultaneous
 targets:
@@ -27,9 +28,11 @@ import numpy as np
 from config import (
     AUTO_GALLERY_NOVELTY_MAX_SIMILARITY,
     AUTO_GALLERY_UPDATE_INTERVAL,
+    DISTANCE_ESTIMATION_INTERVAL,
     DUPLICATE_TARGET_SIMILARITY_THRESHOLD,
     EMOTION_ANALYSIS_INTERVAL,
     ENABLE_AUTO_GALLERY_UPDATE,
+    ENABLE_DISTANCE_ESTIMATION,
     ENABLE_EMOTION_ANALYSIS,
     ENABLE_MOTION_COMPENSATION,
     ENABLE_TILED_DETECTION,
@@ -41,6 +44,7 @@ from config import (
     TRACKER_MAX_MISSED_FRAMES,
 )
 from src.detection import PersonDetector
+from src.distance import estimate_distance_m
 from src.emotion import EmotionAnalyzer
 from src.motion_compensation import EgoMotionCompensator
 from src.pose_analysis import PoseAnalyzer
@@ -178,7 +182,7 @@ class DronePersonTrackingPipeline:
     def _update_target(self, target: Target, warped_frame, detections, claimed_boxes: set) -> dict:
         status = {"id": target.id, "color": target.color, "box": None, "score": None,
                   "activity": "unknown", "pose": None, "emotion": None,
-                  "gallery_size": len(target.gallery)}
+                  "gallery_size": len(target.gallery), "distance_m": None}
 
         was_already_locked = target.tracker.is_locked and not target.tracker.lost()
         matched_box = None
@@ -238,6 +242,7 @@ class DronePersonTrackingPipeline:
             target.last_pose_result = None
             target.last_emotion = None
             target.locked_score = None
+            target.last_distance_m = None
             target.activity_classifier.reset()
             target.posture_tracker.reset()
             return status
@@ -270,6 +275,15 @@ class DronePersonTrackingPipeline:
                 head_crop = warped_frame[hy1:hy2, hx1:hx2]
                 target.last_emotion = self.emotion_analyzer.analyze(head_crop)
         status["emotion"] = target.last_emotion
+
+        if (ENABLE_DISTANCE_ESTIMATION
+                and (self._frame_count + target.id) % DISTANCE_ESTIMATION_INTERVAL == 0):
+            bx1, by1, bx2, by2 = matched_box
+            box_height_px = by2 - by1
+            frame_h = warped_frame.shape[0]
+            target.last_distance_m = estimate_distance_m(box_height_px, frame_h)
+            print(f"[DEBUG] T{target.id} box_height={box_height_px} frame_h={frame_h} -> distance={target.last_distance_m}")  # BUNU EKLE
+        status["distance_m"] = target.last_distance_m
 
         speed_activity = target.activity_classifier.update(matched_box)
         is_sitting = target.last_pose_result.is_sitting if target.last_pose_result else None
@@ -393,6 +407,11 @@ class DronePersonTrackingPipeline:
         color = status.get("color", (0, 255, 0))
 
         rows = [("STATUS", status.get("activity", "unknown").upper())]
+
+        distance_m = status.get("distance_m")
+        if distance_m is not None:
+            print(f"[HUD-DEBUG] T{status['id']} rendering distance_m={distance_m}")  # BUNU EKLE
+            rows.append(("RANGE", f"{distance_m:.1f} M"))
 
         pose = status.get("pose")
         if pose is not None:
