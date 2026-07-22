@@ -1,4 +1,3 @@
-# TEST12345
 """
 Orchestrates the full flow, frame by frame, for MULTIPLE simultaneous
 targets:
@@ -282,7 +281,6 @@ class DronePersonTrackingPipeline:
             box_height_px = by2 - by1
             frame_h = warped_frame.shape[0]
             target.last_distance_m = estimate_distance_m(box_height_px, frame_h)
-            print(f"[DEBUG] T{target.id} box_height={box_height_px} frame_h={frame_h} -> distance={target.last_distance_m}")  # BUNU EKLE
         status["distance_m"] = target.last_distance_m
 
         speed_activity = target.activity_classifier.update(matched_box)
@@ -410,7 +408,6 @@ class DronePersonTrackingPipeline:
 
         distance_m = status.get("distance_m")
         if distance_m is not None:
-            print(f"[HUD-DEBUG] T{status['id']} rendering distance_m={distance_m}")  # BUNU EKLE
             rows.append(("RANGE", f"{distance_m:.1f} M"))
 
         pose = status.get("pose")
