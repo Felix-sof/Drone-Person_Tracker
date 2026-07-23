@@ -165,6 +165,16 @@ EMOTION_MIN_FACE_SIZE_PX = 40    # skip analysis on tiny/low-res face crops
 # frame edges. Set this to False for panning/flying footage; keep it True
 # for footage from a roughly stationary hovering camera.
 ENABLE_MOTION_COMPENSATION = True
+# Motion ESTIMATION (corner detection + optical flow) doesn't need full pixel
+# resolution to find a good camera transform -- goodFeaturesToTrack and
+# calcOpticalFlowPyrLK cost scales with pixel count, so estimating on a
+# downscaled copy and only warping the full-res frame is one of the biggest
+# "free" FPS wins available, especially on real high-res drone footage.
+# Lower this further (e.g. 320) for more speed if your source is very
+# high-res; raise it if the estimate starts failing often (too little
+# texture left after downscaling) -- watch for growing jitter as a sign to
+# raise it back up.
+MOTION_COMP_ESTIMATION_WIDTH = 480
 MAX_CORNERS = 300              # goodFeaturesToTrack: how many background points to track
 MIN_CORNERS_REQUIRED = 30      # below this, skip compensation for that frame (unreliable)
 RANSAC_REPROJ_THRESHOLD = 3.0  # pixels; used by estimateAffinePartial2D

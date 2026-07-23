@@ -20,6 +20,9 @@ Controls while running:
           recently added one).
     x  -> remove the currently selected target.
     p  -> pause / resume (video files only)
+    h  -> toggle the on-screen control panel (all shortcuts + live status:
+          active target count, paused state, motion comp/tiling/distance
+          estimation on/off)
     q  -> quit
 
 --video accepts anything OpenCV's VideoCapture understands: a local file
@@ -38,12 +41,16 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from config import (
     CAMERA_INDEX,
+    ENABLE_DISTANCE_ESTIMATION,
+    ENABLE_MOTION_COMPENSATION,
+    ENABLE_TILED_DETECTION,
     FRAME_WIDTH,
     FRAME_HEIGHT,
     ROTATE_FRAME,
     VIDEO_PROCESS_EVERY_N_FRAMES,
 )
 from src.config_validation import validate_config, ConfigError
+from src.control_panel import ControlPanel
 from src.pipeline import DronePersonTrackingPipeline
 
 _ROTATE_CODES = {
@@ -140,8 +147,10 @@ def main():
 
     print("Controls: 'n' new target, 'a' add angle to selected target, "
           "'1'-'9' select target, 'x' remove selected target"
-          + (", 'p' pause/resume" if using_video_file else "") + ", 'q' quit.")
+          + (", 'p' pause/resume" if using_video_file else "")
+          + ", 'h' toggle control panel, 'q' quit.")
 
+    panel = ControlPanel()
     window_ready = False
     paused = False
     last_frame = None
@@ -188,6 +197,14 @@ def main():
         if paused:
             cv2.putText(annotated, "PAUSED", (20, annotated.shape[0] - 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+
+        annotated = panel.draw(annotated, state={
+            "targets": len(pipeline.targets),
+            "paused": paused,
+            "motion_comp": ENABLE_MOTION_COMPENSATION,
+            "tiling": ENABLE_TILED_DETECTION,
+            "distance": ENABLE_DISTANCE_ESTIMATION,
+        })
         cv2.imshow(_WINDOW_NAME, annotated)
 
         # Pace to the source video's real frame rate: figure out how much
@@ -240,6 +257,9 @@ def main():
 
         elif key == ord("p") and using_video_file:
             paused = not paused
+
+        elif key == ord("h"):
+            panel.toggle()
 
     cap.release()
     cv2.destroyAllWindows()
