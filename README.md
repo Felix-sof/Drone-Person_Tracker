@@ -1,13 +1,76 @@
-### Neden Ego-Motion Compensation?
+# Drone Person Tracker (Prototype)
 
-Drone hiçbir zaman tam sabit durmuyor (rüzgar, titreşim, uçuş hareketi). Bu yüzden ham
-görüntüde arka plan da "hareket ediyormuş" gibi görünüyor ve tracker'ı şaşırtıyor.
-`src/motion_compensation.py`, ardışık kareler arasında sparse optical flow + RANSAC ile
-kameranın kendi hareketini (global affine transform) tahmin edip görüntüyü buna göre
-hizalıyor. Bu adımdan sonra kalan hareket gerçek nesne hareketidir -- detection ve
-tracking bu "temizlenmiş" görüntü üzerinde çalışır.
+A computer vision system that recognizes a person from a reference photo and then finds
+and tracks them in a live/recorded camera feed. Built around a search-and-rescue scenario:
+"upload a photo of the missing person, have the system find and track them from the air."
 
-## Kurulum
+## Architecture
+
+```
+Reference Photo ──► Person Detection ──► Re-ID Embedding ──► Reference Vector
+                                                                     │
+Live Frame ──► Ego-Motion Compensation ──► Person Detection ──► Re-ID Match ──► Tracker
+```
+
+### Why Ego-Motion Compensation?
+
+A drone is never perfectly still (wind, vibration, flight motion), so in the raw footage
+the background itself appears to "move," which confuses a tracker. `src/motion_compensation.py`
+estimates the camera's own motion (a global affine transform) between consecutive frames
+using sparse optical flow + RANSAC, and aligns the frame accordingly. Whatever motion
+remains after this step is real object motion -- detection and tracking run on this
+"cleaned" frame.
+
+A few refinements on top of the base approach, covered by `tests/test_motion_compensation.py`:
+
+- **Downscaled estimation** (`MOTION_COMP_ESTIMATION_WIDTH`): motion is estimated on a
+  shrunk copy of the frame for speed, then the translation component is rescaled back up
+  to full resolution before warping -- the rotation/scale part of the affine is left
+  untouched, only translation needs rescaling.
+- **Target-exclusion mask**: corner features are NOT picked from inside a currently
+  tracked target's bounding box, so a moving person can't corrupt the background-motion
+  estimate (which is supposed to reflect the STATIC scene, not the thing that's supposed
+  to be moving).
+- **Safety crop after warping**: `warpAffine` stretches replicate-padded edge pixels into
+  thin streaks near the frame border; a small crop discards that visible artifact rather
+  than showing it to the user.
+- **Cumulative rotation cap** (`MAX_CUMULATIVE_ROTATION_DEG`): several individually-small,
+  same-direction rotation estimates can compound into a frame that's visibly rotated by
+  tens of degrees over time, even though each single-frame estimate looked plausible on
+  its own. The cumulative transform's rotation is checked every frame (not just at the
+  periodic re-anchor interval) and reset the moment it exceeds this cap.
+
+## Tactical Control Panel
+
+Press `h` to toggle an on-screen operator console (`src/control_panel.py`) listing every
+keyboard shortcut plus live system status -- how many targets are locked, paused/active
+state, and whether motion compensation / tiling / distance estimation are currently on.
+Hidden by default so it doesn't clutter the view; costs nothing when hidden. Labels are
+English-only on purpose: `cv2.putText`'s built-in Hershey fonts don't render non-ASCII
+characters cleanly, so this keeps the panel crisp at small sizes.
+
+## Config Validation
+
+`src/config_validation.py` runs a set of startup sanity checks on `config.py` (call
+`validate_config()` once before the pipeline starts processing frames). This catches
+config mistakes that would otherwise fail silently and produce a plausible-but-wrong
+result -- e.g. an out-of-range `CAMERA_VERTICAL_FOV_DEG` silently producing a wrong
+distance estimate instead of an obvious error at startup. Covers distance-estimation
+settings, Re-ID similarity thresholds, tiling settings, and a few runtime/frame settings.
+
+## Tests
+
+```bash
+pip install pytest
+pytest tests/
+```
+
+`tests/test_motion_compensation.py` covers the downscaled-estimation rescaling math, the
+target-exclusion mask, the post-warp safety crop, and the cumulative-rotation-cap
+regression (see above) -- these are geometry/plumbing checks, not full optical-flow
+integration tests, so they don't need a real camera frame.
+
+## Setup
 
 ```bash
 python -m venv venv
@@ -15,152 +78,134 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-İlk çalıştırmada `ultralytics` otomatik olarak `yolov8n.pt` ağırlıklarını indirecek.
+On first run, `ultralytics` will automatically download the `yolov8n.pt` weights.
 
-## Çalıştırma
+## Running
 
 ```bash
-# Referans fotoğrafla başlat
+# Start with a reference photo
 python app/main.py --reference data/reference/person.jpg
 
-# Ya da webcam açıkken 'r' tuşuna basarak referansı canlı yakala
+# Or start the webcam and press 'r' to capture the reference live
 python app/main.py
 ```
 
-Tuşlar: `n` = yeni hedef ekle, `a` = seçili hedefe ek açı ekle, `1`-`9` = hedef seç,
-`x` = seçili hedefi kaldır, `p` = duraklat/devam (video dosyasında), `q` = çıkış.
+Keys: `n` = add a new target, `a` = add another angle to the selected target, `1`-`9` =
+select a target, `x` = remove the selected target, `p` = pause/resume (video files only),
+`q` = quit.
 
-## Çoklu Hedef Takibi
+## Multi-Target Tracking
 
-Sistem artık aynı anda birden fazla kişiyi (varsayılan üst sınır 5, `MAX_CONCURRENT_TARGETS`)
-bağımsız olarak takip edebiliyor. Her hedefin kendi galerisi, kendi tracker'ı, kendi
-aktivite/duruş durumu var -- birbirine karışmıyorlar. Aynı fiziksel kişinin iki farklı
-hedef olarak sayılmasını önlemek için, yeni bir hedef eklerken (`n`) sistem önce "bu kişi
-zaten takip ettiğim birine benziyor mu" diye kontrol ediyor (`DUPLICATE_TARGET_SIMILARITY_THRESHOLD`);
-öyleyse yeni ID vermeyi reddedip mevcut hedefin ID'sini söylüyor, o zaman `a` ile açı eklemen gerekiyor.
+The system can track several people at once (default cap of 5, `MAX_CONCURRENT_TARGETS`),
+each independently. Every target has its own gallery, its own tracker, and its own
+activity/posture state -- they don't interfere with each other. To prevent the same
+physical person from being counted as two different targets, adding a new target (`n`)
+first checks whether they already match an existing target's gallery
+(`DUPLICATE_TARGET_SIMILARITY_THRESHOLD`); if so, creation is refused and the existing
+target's ID is reported instead -- use `a` to add an angle to that target.
 
-Her karede bir kişi bir hedef tarafından "sahiplenildiyse" (claim edildiyse), aynı kare
-içinde başka bir hedef aynı kutuyu tekrar sahiplenemiyor -- bu da çift sayımı engelliyor.
+Once a person is "claimed" by a target in a given frame, no other target can claim the
+same box in that same frame -- this is what prevents double-counting.
 
-## Modül Yapısı
+## Module Layout
 
-| Dosya | Sorumluluk |
+| File | Responsibility |
 |---|---|
-| `src/detection.py` | YOLO ile insan tespiti |
-| `src/reid.py` | Kişi crop'undan embedding çıkarma (OSNet gerçek Re-ID / ResNet18 fallback) + galeri karşılaştırma |
-| `src/motion_compensation.py` | Kamera hareketi tahmini ve kompanzasyonu (kapatılabilir, bkz. `ENABLE_MOTION_COMPENSATION`) |
-| `src/tracker.py` | IOU tabanlı kare-kare takip (hafif, Re-ID'yi her karede çalıştırmamak için) |
-| `src/target.py` | Her hedef için bağımsız durum (galeri, tracker, aktivite/duruş) |
-| `src/activity.py` | Göreceli hıza dayalı hareket durumu (duruyor/yürüyor/koşuyor) |
-| `src/posture.py` | Oturma/kalkma geçişini zaman içinde takip etme |
-| `src/pose_analysis.py` | Uzuv görünürlüğü, el yanında nesne, oturma tespiti, vücut bölümü kutuları |
-| `src/emotion.py` | Yüz ifadesi analizi (DeepFace, FER2013 tabanlı) |
-| `src/distance.py` | Pinhole kamera yaklaşımıyla hedefe kabaca mesafe tahmini |
-| `src/config_validation.py` | Uygulama başlamadan önce `config.py` değerlerinin mantıklı aralıkta olup olmadığını kontrol eder |
-| `src/pipeline.py` | Çoklu hedef orkestrasyonu -- paylaşımlı tespit, hedef başına Re-ID/tracking/analiz |
-| `app/main.py` | Webcam/video üzerinden çalışan canlı demo, çoklu hedef kontrolleri |
-| `tests/test_distance.py` | `src/distance.py` için birim testler |
+| `src/detection.py` | Person detection via YOLO |
+| `src/reid.py` | Embedding extraction from a person crop (real Re-ID via OSNet / ResNet18 fallback) + gallery matching |
+| `src/motion_compensation.py` | Camera motion estimation and compensation (toggleable, see `ENABLE_MOTION_COMPENSATION`) |
+| `src/tracker.py` | Lightweight IOU-based frame-to-frame tracking (avoids running Re-ID every frame) |
+| `src/target.py` | Independent per-target state (gallery, tracker, activity/posture) |
+| `src/activity.py` | Movement state based on relative speed (still/walking/running) |
+| `src/posture.py` | Tracks the sitting/rising transition over time |
+| `src/pose_analysis.py` | Limb visibility, hand-held object detection, sitting estimation, body-part boxes |
+| `src/emotion.py` | Facial expression analysis (DeepFace, FER2013-based) |
+| `src/distance.py` | Rough monocular distance estimation from apparent box height |
+| `src/control_panel.py` | Toggleable on-screen operator console (shortcuts + live system status) |
+| `src/config_validation.py` | Startup sanity checks for `config.py` values |
+| `src/pipeline.py` | Multi-target orchestration -- shared detection, per-target Re-ID/tracking/analysis |
+| `app/main.py` | Live demo over webcam/video, multi-target controls |
 
-### Re-ID Backend Seçimi
+### Choosing a Re-ID Backend
 
-`config.py` içinde `REID_BACKEND = "osnet"` (varsayılan) gerçek bir Re-ID modeli kullanır
-(`torchreid` paketi üzerinden OSNet, Market-1501 gibi kişi-özel veri setlerinde eğitilmiş).
-`torchreid` kurulu değilse ya da ağırlık indirme başarısız olursa sistem otomatik olarak
-`"resnet18"` fallback'ine düşer (genel amaçlı, daha zayıf ama bağımlılıksız).
+In `config.py`, `REID_BACKEND = "osnet"` (default) uses a real Re-ID model (OSNet via the
+`torchreid` package, trained on person-specific datasets like Market-1501). If `torchreid`
+isn't installed or weight download fails, the system automatically falls back to
+`"resnet18"` (general-purpose, weaker, but has no extra dependency).
 
-### Aktivite ve Poz Analizi Sınırlamaları
+### Activity and Pose Analysis Limitations
 
-- **Hareket durumu**: Piksel hızına dayanıyor, gerçek dünya hızı DEĞİL (monoküler kamerada
-  derinlik/ölçek referansı yok). Kameraya uzaklık değiştikçe eşiklerin yeniden ayarlanması
-  gerekebilir (`ACTIVITY_WALK_THRESHOLD_PX_S`, `ACTIVITY_RUN_THRESHOLD_PX_S`).
-- **Uzuv görünürlüğü**: Bir eklem noktasının tespit edilememesi açı, gölge, veya örtülmeden
-  kaynaklanabilir -- bu bir tıbbi yaralanma teşhisi değildir, sadece "şu an kamerada görünmüyor"
-  bilgisidir. Yorumlamayı her zaman bir insan operatöre bırakın.
-- **El yanında nesne**: Bilek etrafında küçük bir bölgede genel nesne tespiti çalıştırılıyor,
-  gerçek bir "tutma" doğrulaması değil, kaba bir yakınlık sinyali. Ayrıca COCO sınıflarında
-  olmayan uzun/ince cisimler (sopa, bayrak sırığı gibi) için kontur tabanlı bir şekil sezgiseli
-  var -- bu da nesne KİMLİĞİNİ değil sadece "uzun/ince bir şekil var" bilgisini veriyor.
-- **Oturma/kalkma tespiti**: Kalça-diz-ayak bileği açısına bakıyor (dar açı = oturuyor). Aşırı
-  kamera açılarında (çok yandan/tepeden çekim gibi) yanılabilir, kalibre edilmiş bir ölçüm değil.
-- **Vücut bölümü kutuları**: Kafa/gövde/kollar/bacaklar için ayrı kutular, eklem noktalarının
-  (keypoint) konumlarından hesaplanıyor. Bir eklem noktası güvenle görünmüyorsa o bölge için
-  kutu çizilmiyor (yani her zaman 6 kutunun hepsini görmeyebilirsin, bu normal).
-- **Yüz ifadesi (emotion) analizi**: DeepFace'in FER2013 tabanlı hazır modelini kullanıyor,
-  7 kategori var (angry/disgust/fear/happy/sad/surprise/neutral). Bu bilinen ölçüde kusurlu,
-  genel amaçlı bir sınıflandırıcı -- kesin bir psikolojik durum tespiti değil, insan
-  operatörün yorumlaması gereken kaba bir sinyal olarak düşünülmeli. `deepface` kurulu
-  değilse ya da yüklenemezse özellik sessizce devre dışı kalır, uygulama çökmez.
+- **Movement state**: based on relative pixel speed, NOT real-world speed (a monocular
+  camera has no depth/scale reference). Thresholds may need retuning as distance to the
+  camera changes (`ACTIVITY_WALK_THRESHOLD_HEIGHTS_S`, `ACTIVITY_RUN_THRESHOLD_HEIGHTS_S`).
+- **Limb visibility**: a keypoint failing to be detected can be caused by camera angle,
+  shadow, or occlusion -- this is NOT a medical injury diagnosis, only "not visible to the
+  camera right now" information. Interpretation should always be left to a human operator.
+- **Hand-held object detection**: runs on a small region around the wrist; this is a rough
+  proximity signal, not a verified "grasp" confirmation. There's also a contour-based shape
+  heuristic for long/thin objects (sticks, flag poles) that COCO has no class for -- this
+  flags object SHAPE only, not identity.
+- **Sitting/rising detection**: based on the hip-knee-ankle angle (a narrow angle = sitting).
+  Can be fooled by extreme camera angles (heavily side-on or top-down shots); this is not a
+  calibrated measurement.
+- **Body-part boxes**: separate boxes for head/torso/arms/legs, computed from keypoint
+  positions. If a keypoint isn't confidently visible, no box is drawn for that part (so you
+  won't always see all six boxes -- that's expected).
+- **Facial expression (emotion) analysis**: uses DeepFace's pretrained FER2013-based model,
+  7 categories (angry/disgust/fear/happy/sad/surprise/neutral). This is a known-imperfect,
+  general-purpose classifier -- not a definitive psychological assessment, and should be
+  treated as a rough signal for a human operator to interpret. If `deepface` isn't installed
+  or fails to load, the feature disables itself silently; the app doesn't crash.
 
-## Küçük/Uzak Nesne Desteği (Tiling)
+## Small/Distant Object Support (Tiling)
 
-Drone yüksekten çekim yaptığında insan çok az piksel kaplayabiliyor, YOLO'nun görüntüyü
-tek seferde küçültmesi bu durumda tespiti kaçırabiliyor. `config.py` içinde
-`ENABLE_TILED_DETECTION = True` yaparsan sistem her kareyi örtüşen parçalara bölüp her
-parçayı ayrı ayrı tarıyor, sonra sonuçları birleştiriyor (NMS ile tekrarları temizleyerek).
-Bu, tespit kalitesini artırıyor ama karede birden fazla YOLO çağrısı yapıldığı için
-**belirgin şekilde yavaşlatıyor**. Varsayılan olarak kapalı -- webcam gibi kişinin zaten
-büyük göründüğü durumlarda faydası yok, sadece gecikme ekliyor. Yüksekten drone
-görüntüsü/VisDrone gibi veri setleriyle test ederken açman önerilir.
+When a drone shoots from altitude, a person can occupy very few pixels, and YOLO
+downscaling the whole frame in one pass can miss the detection. Setting
+`ENABLE_TILED_DETECTION = True` in `config.py` makes the system split each frame into
+overlapping tiles, scan each tile separately, then merge the results (deduplicating with
+NMS). This improves detection quality but **noticeably slows things down**, since multiple
+YOLO calls run per frame. Off by default -- there's no benefit for something like a webcam
+where the person already appears large, only added latency. Recommended when testing with
+high-altitude drone footage or datasets like VisDrone.
 
-İlgili ayarlar:
-- `TILE_SIZE_PX`: her parçanın piksel boyutu (varsayılan 640, YOLO'nun doğal girdi boyutu)
-- `TILE_OVERLAP_RATIO`: parçalar arası örtüşme oranı (kenardaki nesnelerin bölünmemesi için)
-- `TILING_NMS_IOU_THRESHOLD`: örtüşen bölgelerdeki tekrar tespitleri birleştirme eşiği
+Related settings:
+- `TILE_SIZE_PX`: pixel size of each tile (default 640, YOLO's native input size)
+- `TILE_OVERLAP_RATIO`: overlap ratio between neighboring tiles (so edge objects aren't split)
+- `TILING_NMS_IOU_THRESHOLD`: threshold for merging duplicate detections in overlapping regions
 
-## Mesafe Tahmini
+## Distance Estimation
 
-`config.py` içinde `ENABLE_DISTANCE_ESTIMATION = True` (varsayılan) ile her hedef için kabaca
-bir mesafe tahmini ("~15.3 M") HUD panelinde gösteriliyor. Yöntem: klasik pinhole kamera
-yaklaşımı -- hedefin ekrandaki piksel yüksekliği ile kameranın dikey görüş açısı (FOV) ve
-varsayılan bir insan boyu (1.7m) kullanılarak mesafe hesaplanıyor.
+With `ENABLE_DISTANCE_ESTIMATION = True` (default) in `config.py`, a rough distance
+estimate (e.g. "15.3M") is shown in the HUD panel for each target. Method: the classic
+pinhole-camera approximation -- distance is computed from the target's apparent pixel
+height on screen, the camera's vertical field of view (FOV), and an assumed person height
+(1.7m).
 
-**Önemli:** `CAMERA_VERTICAL_FOV_DEG` değerini **gerçek kameranıza göre ayarlaman gerekiyor**
--- yanlış FOV, gerçekçi görünen ama yanlış bir mesafe üretir, bunu sessizce yapar. Ayrıca bu
-yöntem hedefin **dik durduğunu ve tam göründüğünü** varsayıyor; çömelmiş/oturan/kısmen
-görünen biri için mesafe olduğundan uzak görünür (çünkü görünen boy küçülür, ama sebep
-mesafe değil poz).
+**Important:** you need to set `CAMERA_VERTICAL_FOV_DEG` to match **your actual camera** --
+the wrong FOV silently produces a plausible-looking but wrong distance. This method also
+assumes the target is standing upright and fully visible; someone crouching, sitting, or
+partially visible will appear farther away than they really are (because their apparent
+height shrinks, but not due to distance).
 
-## Isı Görüşlü (Termal) Kamera Desteği
+## Thermal / Infrared Camera Support
 
-Video giriş katmanı (`app/main.py --video`) `cv2.VideoCapture`'ın anladığı her kaynağı kabul
-ediyor -- bu, UVC üzerinden standart bir webcam gibi görünen bir termal kamerayı da kapsıyor,
-yani I/O seviyesinde ekstra kod değişikliği gerekmeden bağlanabilir. **Ancak** çalışmayan kısım
-şu: bu projedeki her tespit/pose/Re-ID modeli sıradan RGB görüntülerle eğitilmiş. Termal
-karelerde insanlar ayırt edici özelliği olmayan parlak lekeler gibi görünüyor (kıyafet
-rengi/dokusu yok), bu da hazır RGB modellerin doğruluğunu ölçülebilir şekilde düşürüyor
-(Teledyne FLIR ADAS gibi veri setlerinde yayınlanmış sonuçlar bunu gösteriyor). Gerçek termal
-desteği eklemek bir config ayarı değil, bir **model eğitimi projesi** (örn. YOLO'yu termal bir
-veri setinde fine-tune etmek) -- şu an için uygulanmadı, gelecekteki bir yön olarak not
-düşülüyor.
+The video input layer (`app/main.py --video`) accepts anything `cv2.VideoCapture`
+understands -- this includes a thermal camera that exposes itself as a standard UVC
+webcam, so it can be connected at the I/O level with no extra code changes. **However**,
+here's what doesn't work: every detection/pose/Re-ID model in this project is trained on
+ordinary RGB imagery. In thermal frames, people appear as undifferentiated bright blobs
+(no clothing color/texture), which measurably degrades off-the-shelf RGB model accuracy
+(published results on datasets like Teledyne FLIR ADAS demonstrate this). Adding real
+thermal support is a model-training project (e.g. fine-tuning YOLO on a thermal dataset),
+not a config flag -- not implemented yet, noted here as a future direction.
 
-## Config Validasyonu ve Testler
+## Known Limitations / Next Steps
 
-Uygulama başlamadan önce `src/config_validation.py` içindeki `validate_config()`
-fonksiyonu çalışıyor ve `config.py`'deki kritik ayarların (FOV açısı, Re-ID eşikleri,
-tiling ayarları vb.) mantıklı aralıkta olup olmadığını kontrol ediyor. Örneğin
-`CAMERA_VERTICAL_FOV_DEG` fiziksel olarak imkansız bir değere (0 veya 180+) ayarlanmışsa,
-uygulama sessizce yanlış mesafe üretmek yerine açık bir `[CONFIG ERROR]` mesajıyla
-başlamayı reddediyor.
-
-Ayrıca `tests/` klasöründe `pytest` ile çalışan birim testler var (şu an
-`src/distance.py` için). Çalıştırmak için:
-
-```bash
-pip install pytest
-pytest tests/ -v
-```
-
-Proje kökündeki `pytest.ini` dosyası (`pythonpath = .`), testlerin `src/` ve `app/`
-paketlerini doğru şekilde import edebilmesini sağlıyor.
-
-## Bilinen Sınırlamalar / Sonraki Adımlar
-
-- **Gerçek drone feed'i**: `cv2.VideoCapture(CAMERA_INDEX)` yerine bir RTSP stream URL'i
-  verilerek gerçek drone video akışına bağlanabilir. `app/main.py --video` parametresi
-  hem yerel video dosyalarını hem de RTSP/HTTP stream URL'lerini destekliyor.
-- **Çoklu benzer kişi**: Aynı renk kıyafeti giyen başka biri varsa yanlış eşleşme riski
-  var; `REID_MATCH_THRESHOLD` ayarı ve/veya ek özellik (yürüyüş biçimi vb.) gerekebilir.
-- **Termal kamera**: Yukarıda açıklandığı gibi, I/O seviyesinde destekleniyor ama model
-  doğruluğu için termal-özel eğitim gerekiyor.
-- **Test kapsamı**: Şu an sadece `src/distance.py` için birim test var; diğer
-  modüller (tracker, Re-ID, pose analysis) henüz test edilmiyor.
+- **Real drone feed**: an RTSP stream URL can be used instead of
+  `cv2.VideoCapture(CAMERA_INDEX)` to connect to an actual drone video feed. The
+  `app/main.py --video` argument supports both local video files and RTSP/HTTP stream URLs.
+- **Multiple similar-looking people**: if someone else is wearing the same color clothing,
+  there's a risk of mismatching; adjusting `REID_MATCH_THRESHOLD` and/or adding another
+  feature (e.g. gait) may be needed.
+- **Thermal camera**: as described above, supported at the I/O level but needs
+  thermal-specific training for real model accuracy.
