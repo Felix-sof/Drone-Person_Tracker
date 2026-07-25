@@ -31,6 +31,7 @@ from ultralytics import YOLO
 
 from config import (
     BODY_PART_BOX_PADDING_PX,
+    HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX,
     HAND_OBJECT_ROI_RADIUS_PX,
     POSE_KEYPOINT_CONF_THRESHOLD,
     POSE_LIMB_KEYPOINTS,
@@ -40,6 +41,7 @@ from config import (
     STICK_ASPECT_RATIO_THRESHOLD,
     STICK_MIN_LENGTH_PX,
 )
+from src.device import get_inference_device
 
 # COCO-17 keypoint index groups used to build per-body-part boxes.
 _BODY_PART_GROUPS = {
@@ -56,6 +58,11 @@ _LEG_TRIPLES = {
     "left": (11, 13, 15),
     "right": (12, 14, 16),
 }
+
+# COCO-17 elbow index for each wrist, used to compute forearm direction so
+# the arm itself can be excluded from the hand-object check (see
+# HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX in config.py).
+_ELBOW_KEYPOINT_FOR_WRIST = {"left_wrist": 7, "right_wrist": 8}
 
 
 @dataclass
@@ -79,6 +86,8 @@ def _angle_at_vertex(a, b, c) -> float:
 class PoseAnalyzer:
     def __init__(self):
         self.pose_model = YOLO(POSE_MODEL)
+        self.device, self.half = get_inference_device()
+        self.pose_model.to(self.device)
 
     def analyze(self, frame_bgr: np.ndarray, target_box) -> PoseResult | None:
         x1, y1, x2, y2 = target_box
@@ -90,7 +99,9 @@ class PoseAnalyzer:
         if crop.size == 0:
             return None
 
-        results = self.pose_model.predict(crop, verbose=False)[0]
+        results = self.pose_model.predict(
+            crop, device=self.device, half=self.half, verbose=False
+        )[0]
         if results.keypoints is None or len(results.keypoints) == 0:
             return None
 
@@ -121,11 +132,25 @@ class PoseAnalyzer:
         ox, oy = offset
         findings = []
 
-        for hand_name, idx in POSE_WRIST_KEYPOINTS.items():
-            if kpts_conf[idx] < POSE_KEYPOINT_CONF_THRESHOLD:
+        for hand_name, wrist_idx in POSE_WRIST_KEYPOINTS.items():
+            if kpts_conf[wrist_idx] < POSE_KEYPOINT_CONF_THRESHOLD:
                 continue
 
-            wx, wy = kpts_xy[idx]
+            elbow_idx = _ELBOW_KEYPOINT_FOR_WRIST[hand_name]
+            if kpts_conf[elbow_idx] < POSE_KEYPOINT_CONF_THRESHOLD:
+                # Can't tell which direction the forearm is coming from, so
+                # we can't safely exclude it -- skip rather than risk
+                # flagging the person's own arm as a held object.
+                continue
+
+            wx, wy = kpts_xy[wrist_idx]
+            ex, ey = kpts_xy[elbow_idx]
+            forearm_dir = np.array([wx - ex, wy - ey], dtype=np.float64)
+            norm = np.linalg.norm(forearm_dir)
+            if norm < 1e-3:
+                continue
+            forearm_dir /= norm
+
             wx, wy = wx + ox, wy + oy
 
             r = HAND_OBJECT_ROI_RADIUS_PX
@@ -135,18 +160,27 @@ class PoseAnalyzer:
             if roi.size == 0:
                 continue
 
-            score = self._detect_elongated_shape(roi)
+            wrist_local = (wx - rx1, wy - ry1)
+            score = self._detect_elongated_shape(roi, wrist_local, forearm_dir)
             if score is not None:
                 findings.append((hand_name, "elongated object (stick/pole/flag)", score))
 
         return findings
 
     @staticmethod
-    def _detect_elongated_shape(roi_bgr) -> float | None:
+    def _detect_elongated_shape(roi_bgr, wrist_local=None, forearm_dir=None) -> float | None:
         """
         Returns a pseudo-confidence (0-1) if an elongated contour is found
         in the ROI, else None. Pure OpenCV contour geometry, no model
         inference -- flags SHAPE only, not object identity.
+
+        wrist_local/forearm_dir (optional): when given, a candidate shape
+        is only accepted if it sits on the far side of the wrist, AWAY from
+        the elbow -- this is what a genuinely held object (extending past
+        the hand) looks like. A shape on the near side (toward the elbow)
+        is almost always the person's own forearm/sleeve edge, which is
+        elongated by definition and would otherwise false-positive on every
+        single frame regardless of whether anything is actually held.
         """
         gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
         edges = cv2.Canny(gray, 50, 150)
@@ -160,16 +194,23 @@ class PoseAnalyzer:
         for c in contours:
             if cv2.contourArea(c) < 15:
                 continue
-            (_, _), (rw, rh), _ = cv2.minAreaRect(c)
+            (cx, cy), (rw, rh), _ = cv2.minAreaRect(c)
             if rw == 0 or rh == 0:
                 continue
             long_side, short_side = max(rw, rh), max(min(rw, rh), 1e-3)
             aspect_ratio = long_side / short_side
 
-            if long_side >= STICK_MIN_LENGTH_PX and aspect_ratio >= STICK_ASPECT_RATIO_THRESHOLD:
-                score = min(1.0, aspect_ratio / (STICK_ASPECT_RATIO_THRESHOLD * 2))
-                if best_score is None or score > best_score:
-                    best_score = score
+            if long_side < STICK_MIN_LENGTH_PX or aspect_ratio < STICK_ASPECT_RATIO_THRESHOLD:
+                continue
+
+            if wrist_local is not None and forearm_dir is not None:
+                centroid_vec = np.array([cx - wrist_local[0], cy - wrist_local[1]])
+                if np.dot(centroid_vec, forearm_dir) < HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX:
+                    continue  # sits toward the elbow -- this is the arm, not an object
+
+            score = min(1.0, aspect_ratio / (STICK_ASPECT_RATIO_THRESHOLD * 2))
+            if best_score is None or score > best_score:
+                best_score = score
 
         return best_score
 
