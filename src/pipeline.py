@@ -3,9 +3,7 @@ Orchestrates the full flow, frame by frame, for MULTIPLE simultaneous
 targets:
 
   raw frame
-    -> ego-motion compensation   (cancel camera shake/drift, shared;
-       excludes currently-tracked target regions from corner search so a
-       moving person can't corrupt the background-motion estimate)
+    -> ego-motion compensation   (cancel camera shake/drift, shared)
     -> person detection          (YOLO, ONE shared pass for all targets)
     -> for each target (own gallery, own tracker, own activity/pose state):
          -> IOU-continuity match against detections NOT already claimed
@@ -14,7 +12,6 @@ targets:
             detections, with switch-margin hysteresis
          -> periodic pose analysis, emotion analysis, activity/posture
          -> periodic automatic gallery growth
-         -> periodic MySQL event logging (see src/db.py)
     -> annotated output frame (each target in its own color, dashboard-
        style HUD panel, corner-bracket box instead of a solid rectangle)
 
@@ -30,12 +27,11 @@ import numpy as np
 from config import (
     AUTO_GALLERY_NOVELTY_MAX_SIMILARITY,
     AUTO_GALLERY_UPDATE_INTERVAL,
-    DB_LOG_INTERVAL_FRAMES,
+    DB_LOG_INTERVAL,
     DISTANCE_ESTIMATION_INTERVAL,
     DUPLICATE_TARGET_SIMILARITY_THRESHOLD,
     EMOTION_ANALYSIS_INTERVAL,
     ENABLE_AUTO_GALLERY_UPDATE,
-    ENABLE_DB_LOGGING,
     ENABLE_DISTANCE_ESTIMATION,
     ENABLE_EMOTION_ANALYSIS,
     ENABLE_MOTION_COMPENSATION,
@@ -47,7 +43,7 @@ from config import (
     REID_SWITCH_MARGIN,
     TRACKER_MAX_MISSED_FRAMES,
 )
-from src.db import EventLogger
+from src.db import log_target_event
 from src.detection import PersonDetector
 from src.distance import estimate_distance_m
 from src.emotion import EmotionAnalyzer
@@ -56,15 +52,6 @@ from src.pose_analysis import PoseAnalyzer
 from src.reid import ReIDEmbedder, best_match
 from src.target import Target
 from src.tracker import iou
-
-_BODY_PART_COLORS = {
-    "head": (255, 0, 255),
-    "torso": (255, 255, 0),
-    "left_arm": (0, 200, 255),
-    "right_arm": (0, 200, 255),
-    "left_leg": (255, 128, 0),
-    "right_leg": (255, 128, 0),
-}
 
 
 class AddTargetResult:
@@ -81,23 +68,10 @@ class DronePersonTrackingPipeline:
         self.motion_compensator = EgoMotionCompensator()
         self.pose_analyzer = PoseAnalyzer()
         self.emotion_analyzer = EmotionAnalyzer()
-        self.event_logger = EventLogger()
 
         self.targets: list[Target] = []
         self._next_target_id = 1
         self._frame_count = 0
-
-    def start_session(self, video_source: str) -> None:
-        """Call once at app startup, before the first process_frame() call,
-        to open a MySQL logging session tagged with the video source
-        (e.g. a filename or 'webcam'). No-op if DB logging isn't enabled
-        or the connection failed."""
-        if ENABLE_DB_LOGGING:
-            self.event_logger.start_session(video_source)
-
-    def close(self) -> None:
-        """Call once at app shutdown to cleanly close the DB connection."""
-        self.event_logger.close()
 
     # ------------------------------------------------------------------
     # Target management
@@ -189,20 +163,10 @@ class DronePersonTrackingPipeline:
     def process_frame(self, frame_bgr: np.ndarray):
         self._frame_count += 1
 
-        # Boxes from the PREVIOUS frame's locked targets -- one-frame-stale
-        # is fine (see src/motion_compensation.py's exclusion-mask docs) --
-        # so ego-motion estimation doesn't pick corner features sitting on
-        # a moving person and mistake that for camera motion.
-        exclude_boxes = [
-            t.tracker.current_box for t in self.targets
-            if t.tracker.is_locked and not t.tracker.lost() and t.tracker.current_box is not None
-        ]
-
-        if ENABLE_MOTION_COMPENSATION:
-            warped_frame, _affine = self.motion_compensator.step(frame_bgr, exclude_boxes=exclude_boxes)
-        else:
-            warped_frame, _affine = frame_bgr, None
-
+        warped_frame, _affine = (
+            self.motion_compensator.step(frame_bgr) if ENABLE_MOTION_COMPENSATION
+            else (frame_bgr, None)
+        )
         detections = (self.detector.detect_tiled(warped_frame) if ENABLE_TILED_DETECTION
                       else self.detector.detect(warped_frame))
 
@@ -247,7 +211,7 @@ class DronePersonTrackingPipeline:
         needs_rescan = (
             matched_box is None
             and (target.tracker.lost()
-                 or self._frame_count % REID_RESCAN_INTERVAL == 0)
+                 or (self._frame_count + target.id) % REID_RESCAN_INTERVAL == 0)
         )
         if needs_rescan:
             available = [d for d in detections if d.box not in claimed_boxes]
@@ -293,9 +257,12 @@ class DronePersonTrackingPipeline:
             status["gallery_size"] = len(target.gallery)
 
         # Stagger expensive per-target work across frames using each
-        # target's own ID as a phase offset, so ALL targets' heavy analysis
-        # doesn't land on the exact same frame (which would cause a
-        # periodic latency spike / stutter).
+        # target's own ID as a phase offset. Without this, ALL targets'
+        # heavy analysis (pose model, emotion model) lands on the exact
+        # same frame every POSE_ANALYSIS_INTERVAL/EMOTION_ANALYSIS_INTERVAL
+        # frames, creating a periodic latency spike that feels like
+        # stuttering. Staggering spreads that cost evenly across frames
+        # instead, for smoother (if slightly less fresh) playback.
         if (self._frame_count + target.id) % POSE_ANALYSIS_INTERVAL == 0:
             target.last_pose_result = self.pose_analyzer.analyze(warped_frame, matched_box)
         status["pose"] = target.last_pose_result
@@ -323,18 +290,10 @@ class DronePersonTrackingPipeline:
         posture_label = target.posture_tracker.update(is_sitting)
         status["activity"] = posture_label if posture_label is not None else speed_activity
 
-        if (ENABLE_DB_LOGGING
-                and (self._frame_count + target.id) % DB_LOG_INTERVAL_FRAMES == 0):
-            pose = target.last_pose_result
-            self.event_logger.log_event(
-                local_target_id=target.id,
-                frame_number=self._frame_count,
-                box=matched_box,
-                activity=status["activity"],
-                distance_m=target.last_distance_m,
-                emotion=target.last_emotion,
-                limbs_visible=(pose.all_core_limbs_visible if pose else None),
-                holding_object=(bool(pose.objects_near_hands) if pose else None),
+        if (self._frame_count + target.id) % DB_LOG_INTERVAL == 0:
+            log_target_event(
+                target.id, status["activity"], posture_label, target.last_emotion,
+                target.last_distance_m, matched_box,
             )
 
         return status
@@ -457,7 +416,7 @@ class DronePersonTrackingPipeline:
 
         distance_m = status.get("distance_m")
         if distance_m is not None:
-            rows.append(("RANGE", f"{distance_m:.1f}M"))
+            rows.append(("RANGE", f"{distance_m:.1f} M"))
 
         pose = status.get("pose")
         if pose is not None:

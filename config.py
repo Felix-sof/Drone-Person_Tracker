@@ -246,19 +246,6 @@ DISTANCE_ESTIMATION_INTERVAL = 5   # frames; cheap (pure math), no need every fr
 # real thermal support is a model-training project (e.g. fine-tuning YOLO
 # on a thermal dataset), not a config flag -- noted here as a known future
 # direction rather than implemented.
-HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX = 15
+HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX = 10  # px buffer past the wrist before a shape counts as a candidate object instead of the forearm/sleeve itself
 
-
-MAX_CUMULATIVE_ROTATION_DEG = 30
-
-MOTION_COMP_CROP_MARGIN_PCT = 0.05
-
-MOTION_COMP_EXCLUSION_PAD_RATIO = 0.1
-
-ENABLE_DB_LOGGING = True
-DB_HOST = "localhost"
-DB_PORT = 3306
-DB_USER = "root"
-DB_PASSWORD = "1"
-DB_NAME = "drone_tracker"
-DB_LOG_INTERVAL_FRAMES = 15
+DB_LOG_INTERVAL = 15  # her N karede bir MySQL'e yaz (performans icin)

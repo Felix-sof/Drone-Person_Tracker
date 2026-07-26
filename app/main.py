@@ -109,7 +109,6 @@ def main():
     args = parser.parse_args()
 
     pipeline = DronePersonTrackingPipeline()
-    pipeline.start_session(args.video if using_video_file else "webcam")
     selected_target_id = None
 
     if args.reference:
@@ -262,7 +261,6 @@ def main():
         elif key == ord("h"):
             panel.toggle()
 
-    pipeline.close()
     cap.release()
     cv2.destroyAllWindows()
 
