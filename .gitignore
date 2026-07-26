@@ -19,3 +19,5 @@ data/reference/*
 .DS_Store
 Thumbs.db
 *.log
+
+.env

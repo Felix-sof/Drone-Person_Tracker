@@ -27,6 +27,7 @@ import numpy as np
 from config import (
     AUTO_GALLERY_NOVELTY_MAX_SIMILARITY,
     AUTO_GALLERY_UPDATE_INTERVAL,
+    DB_LOG_INTERVAL,
     DISTANCE_ESTIMATION_INTERVAL,
     DUPLICATE_TARGET_SIMILARITY_THRESHOLD,
     EMOTION_ANALYSIS_INTERVAL,
@@ -42,6 +43,7 @@ from config import (
     REID_SWITCH_MARGIN,
     TRACKER_MAX_MISSED_FRAMES,
 )
+from src.db import log_target_event
 from src.detection import PersonDetector
 from src.distance import estimate_distance_m
 from src.emotion import EmotionAnalyzer
@@ -287,6 +289,12 @@ class DronePersonTrackingPipeline:
         is_sitting = target.last_pose_result.is_sitting if target.last_pose_result else None
         posture_label = target.posture_tracker.update(is_sitting)
         status["activity"] = posture_label if posture_label is not None else speed_activity
+
+        if (self._frame_count + target.id) % DB_LOG_INTERVAL == 0:
+            log_target_event(
+                target.id, status["activity"], posture_label, target.last_emotion,
+                target.last_distance_m, matched_box,
+            )
 
         return status
 

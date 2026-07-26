@@ -246,3 +246,6 @@ DISTANCE_ESTIMATION_INTERVAL = 5   # frames; cheap (pure math), no need every fr
 # real thermal support is a model-training project (e.g. fine-tuning YOLO
 # on a thermal dataset), not a config flag -- noted here as a known future
 # direction rather than implemented.
+HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX = 10  # px buffer past the wrist before a shape counts as a candidate object instead of the forearm/sleeve itself
+
+DB_LOG_INTERVAL = 15  # her N karede bir MySQL'e yaz (performans icin)
