@@ -9,3 +9,6 @@ torchreid>=0.2.5        # real person Re-ID backbone (OSNet); auto-downloads wei
 tensorboard>=2.15.0     # required by torchreid internally, not auto-installed by it
 deepface>=0.0.93        # facial expression (emotion) analysis; pulls in tensorflow
 tf-keras>=2.15.0         # newer tensorflow versions split Keras out; deepface needs this bridge
+
+mysql-connector-python>=8.3.0   # MySQL baglantisi
+python-dotenv>=1.0.0            # .env dosyasindan sifre/host okuma
