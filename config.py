@@ -4,9 +4,9 @@ Keep all tunable thresholds here so experiments don't require touching pipeline 
 """
 
 # --- Detection ---
-YOLO_MODEL = "yolov8n.pt"      # nano model: fastest, good enough for prototyping on CPU
-YOLO_CONF_THRESHOLD = 0.4
-PERSON_CLASS_ID = 0            # COCO class id for "person"
+YOLO_MODEL = "models/yolov8m_visdrone.pt"
+YOLO_CONF_THRESHOLD = 0.25
+PERSON_CLASS_NAMES = ["pedestrian", "people", "person"]
 
 # --- Tiled ("sliced") detection for small/distant objects ---
 # YOLO downscales the whole frame to a fixed input size (e.g. 640x640)
@@ -22,7 +22,7 @@ PERSON_CLASS_ID = 0            # COCO class id for "person"
 # fills a large part of the frame, tiling only adds latency for no gain);
 # turn on for footage where people are small (e.g. high-altitude drone
 # video, like VisDrone-style clips).
-ENABLE_TILED_DETECTION = False
+ENABLE_TILED_DETECTION = True
 TILE_SIZE_PX = 640
 TILE_OVERLAP_RATIO = 0.2        # fraction of tile size overlapped between neighboring tiles
 TILING_NMS_IOU_THRESHOLD = 0.45  # merges duplicate detections found in overlap regions
