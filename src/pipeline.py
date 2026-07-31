@@ -90,7 +90,23 @@ class DronePersonTrackingPipeline:
         if not detections:
             return AddTargetResult(False, None, "No person detected in this frame.")
 
-        largest = max(detections, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
+        # Ignore detections that ARE one of the targets we're already
+        # tracking. Without this, "largest person in the whole frame" tends
+        # to just re-pick an existing (usually closer/bigger) target instead
+        # of the new person you're pointing at -- which then looks like a
+        # false "already tracked" refusal on every subsequent 'n' press,
+        # even though the person you actually want to add was never
+        # embedded or compared at all.
+        candidates = self._exclude_tracked_detections(detections)
+        if not candidates:
+            return AddTargetResult(
+                False, None,
+                "Only already-tracked target(s) are visible in this frame -- "
+                "get the new person clearly in view (ideally alone, or bigger "
+                "than the existing targets) before pressing 'n' again."
+            )
+
+        largest = max(candidates, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
         x1, y1, x2, y2 = largest.box
         crop = frame_bgr[y1:y2, x1:x2]
         if crop.size == 0:
@@ -123,7 +139,24 @@ class DronePersonTrackingPipeline:
         if not detections:
             return AddTargetResult(False, None, "No person detected in this frame.")
 
-        largest = max(detections, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
+        # Match against THIS target's own last-known box, not "whoever is
+        # biggest in the frame" -- with multiple targets on screen, the
+        # biggest person is often a DIFFERENT target, and blindly taking
+        # them here would silently add a wrong-person embedding to this
+        # target's gallery (a much worse failure than add_target's, since
+        # nothing refuses it -- it just quietly corrupts future Re-ID
+        # matches for this target).
+        if target.tracker.current_box is not None:
+            best_det = max(detections, key=lambda d: iou(d.box, target.tracker.current_box))
+            if iou(best_det.box, target.tracker.current_box) < 0.1:
+                return AddTargetResult(
+                    False, None,
+                    f"Could not find target #{target_id} in this frame -- "
+                    f"make sure they're clearly in view before pressing 'a'."
+                )
+            largest = best_det
+        else:
+            largest = max(detections, key=lambda d: (d.box[2] - d.box[0]) * (d.box[3] - d.box[1]))
         x1, y1, x2, y2 = largest.box
         crop = frame_bgr[y1:y2, x1:x2]
         if crop.size == 0:
@@ -148,6 +181,19 @@ class DronePersonTrackingPipeline:
             if t.id == target_id:
                 return t
         return None
+
+    def _exclude_tracked_detections(self, detections: list, iou_threshold: float = 0.3) -> list:
+        """Drops detections that overlap an existing target's current
+        tracked box -- i.e. detections that ARE one of our targets, not a
+        new person standing near/behind them."""
+        tracked_boxes = [t.tracker.current_box for t in self.targets
+                          if t.tracker.current_box is not None]
+        if not tracked_boxes:
+            return detections
+        return [
+            det for det in detections
+            if all(iou(det.box, tb) < iou_threshold for tb in tracked_boxes)
+        ]
 
     def _find_duplicate_target(self, embedding: np.ndarray) -> int | None:
         for target in self.targets:
