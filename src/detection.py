@@ -6,9 +6,12 @@ touch any other module.
 
 from dataclasses import dataclass
 
+import logging
 import cv2
 import numpy as np
 from ultralytics import YOLO
+
+logging.getLogger("ultralytics").setLevel(logging.ERROR)
 from src.device import get_inference_device
 
 from config import (
