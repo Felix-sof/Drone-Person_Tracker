@@ -68,7 +68,16 @@ AUTO_GALLERY_UPDATE_INTERVAL = 20             # frames between auto-capture atte
 AUTO_GALLERY_NOVELTY_MAX_SIMILARITY = 0.90    # skip if already too similar to a stored shot
 
 # --- Multi-target tracking ---
-MAX_CONCURRENT_TARGETS = 5
+MAX_CONCURRENT_TARGETS = 20
+# By default this system works like "search for ONE specific reference
+# person" -- new targets are only added when you press 'n'. Turn this on
+# to instead automatically promote EVERY detected person (that isn't
+# already claimed by an existing target) into its own target, no manual
+# selection needed -- e.g. general crowd/pedestrian tracking instead of
+# finding one missing person. MAX_CONCURRENT_TARGETS still applies as a
+# hard cap either way -- raise it too if you expect more people than that
+# in frame.
+ENABLE_AUTO_TRACK_ALL = True
 # When capturing what's supposed to be a NEW target, check it against every
 # EXISTING target's gallery first. If it matches one this well, refuse to
 # create a duplicate ID for the same physical person -- this is what
@@ -189,6 +198,25 @@ REANCHOR_INTERVAL = 20
 # estimation degenerated (e.g. not enough trackable texture in view).
 MAX_PLAUSIBLE_ROTATION_DEG = 15.0
 MAX_PLAUSIBLE_SCALE_DELTA = 0.15
+# Separate, tighter cap on the CUMULATIVE (composed-over-many-frames)
+# transform's rotation. Several individually-small, same-direction
+# per-frame rotations (each well under MAX_PLAUSIBLE_ROTATION_DEG, so none
+# of them get rejected on their own) can still compound into a frame
+# that's visibly rotated by tens of degrees before the next periodic
+# REANCHOR_INTERVAL reset. This is checked every frame -- the moment the
+# cumulative transform's rotation exceeds this cap, it's reset immediately
+# instead of waiting for the periodic re-anchor.
+MAX_CUMULATIVE_ROTATION_DEG = 10.0
+# Padding (pixels, at estimation resolution) added around each tracked
+# target's box when building the corner-search exclusion mask -- a person's
+# silhouette often has semi-reliable "corner-like" texture right at its
+# edge (clothing/background contrast), so excluding only the exact box
+# still lets a few contaminating points slip in right at the boundary.
+TARGET_EXCLUSION_PADDING_PX = 10
+# Border pixels discarded (then rescaled back up) after warpAffine --
+# warpAffine's replicate border mode stretches edge pixels into thin,
+# visible streaks near the frame boundary; this crop hides that artifact.
+SAFETY_CROP_PX = 4
 
 # --- Tracker (frame-to-frame continuity, IOU-based) ---
 TRACKER_IOU_THRESHOLD = 0.3

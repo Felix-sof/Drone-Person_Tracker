@@ -1,4 +1,4 @@
-"""
+﻿"""
 Ego-motion estimation and compensation.
 
 Idea: most of the pixels in a drone frame belong to the static background.
@@ -20,12 +20,15 @@ import numpy as np
 
 from config import (
     MAX_CORNERS,
+    MAX_CUMULATIVE_ROTATION_DEG,
     MAX_PLAUSIBLE_ROTATION_DEG,
     MAX_PLAUSIBLE_SCALE_DELTA,
     MIN_CORNERS_REQUIRED,
     MOTION_COMP_ESTIMATION_WIDTH,
     RANSAC_REPROJ_THRESHOLD,
     REANCHOR_INTERVAL,
+    SAFETY_CROP_PX,
+    TARGET_EXCLUSION_PADDING_PX,
 )
 
 
@@ -67,10 +70,16 @@ class EgoMotionCompensator:
         small = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
         return small, scale_factor
 
-    def step(self, frame_bgr: np.ndarray):
+    def step(self, frame_bgr: np.ndarray, target_boxes: list | None = None):
         """
         Args:
             frame_bgr: current frame, BGR uint8.
+            target_boxes: full-resolution (x1, y1, x2, y2) boxes of currently
+                tracked targets (from the PREVIOUS frame's tracking result --
+                this frame's detections don't exist yet at this point in the
+                pipeline). Corner features are not picked from inside these
+                boxes, so a moving person can't corrupt the background-motion
+                estimate. None/empty -> search the whole frame, as before.
 
         Returns:
             warped_frame: frame aligned to the reference coordinate frame.
@@ -86,7 +95,8 @@ class EgoMotionCompensator:
             self._prev_gray_small = gray_small
             return frame_bgr.copy(), None
 
-        affine = self._estimate_affine(self._prev_gray_small, gray_small, scale_factor)
+        mask = self._build_exclusion_mask(gray_small.shape[:2], target_boxes, scale_factor)
+        affine = self._estimate_affine(self._prev_gray_small, gray_small, scale_factor, mask)
         self._prev_gray = gray
         self._prev_gray_small = gray_small
 
@@ -106,11 +116,21 @@ class EgoMotionCompensator:
         )
         self._frames_since_reanchor += 1
 
+        # Cumulative-drift cap: several individually-small, same-direction
+        # rotations can each pass _is_plausible() on their own yet still
+        # compound into a frame rotated by tens of degrees before the next
+        # periodic re-anchor. Check the CUMULATIVE rotation every frame (not
+        # just at REANCHOR_INTERVAL) and reset the moment it exceeds this cap.
+        if abs(self._rotation_deg(self._cumulative_transform)) > MAX_CUMULATIVE_ROTATION_DEG:
+            self._cumulative_transform = np.eye(2, 3, dtype=np.float32)
+            self._frames_since_reanchor = 0
+
         h, w = frame_bgr.shape[:2]
         warped = cv2.warpAffine(
             frame_bgr, self._cumulative_transform, (w, h),
             flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE
         )
+        warped = self._apply_safety_crop(warped)
 
         # Re-anchor periodically: treat the current (warped) frame as the new
         # zero-point. Without this, tiny per-frame estimation noise compounds
@@ -135,7 +155,7 @@ class EgoMotionCompensator:
         """
         a, b = affine[0, 0], affine[0, 1]
         scale = math.hypot(a, b)
-        rotation_deg = math.degrees(math.atan2(b, a))
+        rotation_deg = EgoMotionCompensator._rotation_deg(affine)
 
         if abs(rotation_deg) > MAX_PLAUSIBLE_ROTATION_DEG:
             return False
@@ -144,7 +164,63 @@ class EgoMotionCompensator:
         return True
 
     @staticmethod
-    def _estimate_affine(prev_gray: np.ndarray, curr_gray: np.ndarray, scale_factor: float = 1.0):
+    def _rotation_deg(affine: np.ndarray) -> float:
+        """Shared rotation-extraction helper: both the per-frame plausibility
+        check and the cumulative-drift cap rely on this same math, so it's
+        centralized here rather than duplicated."""
+        a, b = affine[0, 0], affine[0, 1]
+        return math.degrees(math.atan2(b, a))
+
+    @staticmethod
+    def _build_exclusion_mask(shape: tuple, target_boxes: list | None, scale_factor: float):
+        """
+        Builds a goodFeaturesToTrack mask (uint8, same `shape` as the
+        estimation-resolution gray image -- possibly downscaled) that
+        excludes currently-tracked targets' regions, so a moving person's
+        silhouette can't be picked up as a "background" corner and corrupt
+        the camera-motion estimate.
+
+        `target_boxes` are (x1, y1, x2, y2) in FULL-RESOLUTION pixel coords;
+        `scale_factor` (original_width / estimation_width) converts them
+        down into the estimation resolution described by `shape`.
+
+        Returns None when there's nothing to exclude -- goodFeaturesToTrack
+        treats mask=None as "search the whole frame", so this is also the
+        zero-cost path when there are no active targets yet.
+        """
+        if not target_boxes:
+            return None
+        h, w = shape
+        mask = np.full((h, w), 255, dtype=np.uint8)
+        pad = TARGET_EXCLUSION_PADDING_PX
+        for box in target_boxes:
+            x1, y1, x2, y2 = box
+            sx1 = max(0, int((x1 - pad) / scale_factor))
+            sy1 = max(0, int((y1 - pad) / scale_factor))
+            sx2 = min(w, int((x2 + pad) / scale_factor))
+            sy2 = min(h, int((y2 + pad) / scale_factor))
+            mask[sy1:sy2, sx1:sx2] = 0
+        return mask
+
+    @staticmethod
+    def _apply_safety_crop(frame: np.ndarray) -> np.ndarray:
+        """
+        warpAffine's replicate border mode stretches edge pixels into thin,
+        visible streaks near the frame boundary. Cropping a small margin off
+        each side and rescaling back up to the original size discards that
+        artifact without changing the output resolution the rest of the
+        pipeline (detection, display) expects.
+        """
+        h, w = frame.shape[:2]
+        c = SAFETY_CROP_PX
+        if h <= 2 * c or w <= 2 * c:
+            return frame
+        cropped = frame[c:h - c, c:w - c]
+        return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
+    @staticmethod
+    def _estimate_affine(prev_gray: np.ndarray, curr_gray: np.ndarray, scale_factor: float = 1.0,
+                          mask: np.ndarray | None = None):
         """
         1) Pick sparse "good" corner points in the previous frame
            (these are likely to be trackable background texture).
@@ -161,7 +237,7 @@ class EgoMotionCompensator:
         """
         prev_pts = cv2.goodFeaturesToTrack(
             prev_gray, maxCorners=MAX_CORNERS, qualityLevel=0.01,
-            minDistance=8, blockSize=7
+            minDistance=8, blockSize=7, mask=mask
         )
         if prev_pts is None or len(prev_pts) < MIN_CORNERS_REQUIRED:
             return None
@@ -197,7 +273,7 @@ class EgoMotionCompensator:
 
     @staticmethod
     def _compose_affine(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
-        """Compose two 2x3 affine transforms: result = outer ∘ inner."""
+        """Compose two 2x3 affine transforms: result = outer . inner."""
         outer_3x3 = np.vstack([outer, [0, 0, 1]])
         inner_3x3 = np.vstack([inner, [0, 0, 1]])
         composed = outer_3x3 @ inner_3x3
