@@ -1,4 +1,4 @@
-"""
+﻿"""
 Person detection wrapper around Ultralytics YOLO.
 Kept intentionally thin -- swapping YOLO versions/weights later shouldn't
 touch any other module.
@@ -9,9 +9,10 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 from ultralytics import YOLO
+from src.device import get_inference_device
 
 from config import (
-    PERSON_CLASS_ID,
+    PERSON_CLASS_NAMES,
     TILE_OVERLAP_RATIO,
     TILE_SIZE_PX,
     TILING_NMS_IOU_THRESHOLD,
@@ -45,22 +46,41 @@ def _tile_starts(total: int, tile: int, stride: int) -> list[int]:
 class PersonDetector:
     def __init__(self, model_path: str = YOLO_MODEL):
         self.model = YOLO(model_path)
+        self.device, self.half = get_inference_device()
+        # Map configured person-like class NAMES to this model's own class
+        # IDs. Different YOLO weights use different label sets (stock
+        # COCO weights: just "person"; VisDrone-style weights: separate
+        # "pedestrian"/"people"/"person" classes) -- resolving by name
+        # instead of a hardcoded ID keeps this working across models.
+        name_to_id = {name.lower(): idx for idx, name in self.model.names.items()}
+        self._person_class_ids = [
+            name_to_id[n.lower()] for n in PERSON_CLASS_NAMES if n.lower() in name_to_id
+        ]
+        if not self._person_class_ids:
+            raise ValueError(
+                f"None of PERSON_CLASS_NAMES={PERSON_CLASS_NAMES} match this "
+                f"model's classes: {list(self.model.names.values())}"
+            )
 
     def detect(self, frame_bgr: np.ndarray) -> list[Detection]:
         """Standard single-pass detection on the whole frame."""
         results = self.model.predict(
             frame_bgr,
-            classes=[PERSON_CLASS_ID],
+            classes=self._person_class_ids,
             conf=YOLO_CONF_THRESHOLD,
+            device=self.device,
+            half=self.half,
             verbose=False,
         )[0]
 
-        detections = []
-        for box in results.boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-            conf = float(box.conf[0])
-            detections.append(Detection(box=(x1, y1, x2, y2), confidence=conf))
-        return detections
+        if len(results.boxes) == 0:
+            return []
+        boxes_xyxy = results.boxes.xyxy.cpu().numpy().astype(int)
+        confs = results.boxes.conf.cpu().numpy()
+        return [
+            Detection(box=tuple(int(v) for v in box), confidence=float(conf))
+            for box, conf in zip(boxes_xyxy, confs)
+        ]
 
     def detect_tiled(self, frame_bgr: np.ndarray) -> list[Detection]:
         """

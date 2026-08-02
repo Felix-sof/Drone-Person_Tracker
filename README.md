@@ -107,6 +107,16 @@ target's ID is reported instead -- use `a` to add an angle to that target.
 Once a person is "claimed" by a target in a given frame, no other target can claim the
 same box in that same frame -- this is what prevents double-counting.
 
+**Selecting the right person for `n` / `a`:** with several people in frame, "who does
+`n` (add target) or `a` (add angle) actually pick?" needs to be unambiguous. `add_target`
+excludes any detection that overlaps an existing target's current box (IoU >= 0.3) before
+picking the largest remaining person -- otherwise it could re-select an already-tracked
+person instead of the new one, and falsely refuse with "already tracked". `add_angle`
+matches strictly against the TARGET'S OWN last-known box (also via IoU) rather than the
+largest person in frame -- otherwise, with multiple targets on screen, it could silently
+add a different person's embedding into the wrong target's gallery and corrupt future
+Re-ID matches for both targets involved.
+
 ## Module Layout
 
 | File | Responsibility |
