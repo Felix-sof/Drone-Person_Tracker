@@ -25,7 +25,11 @@ keeping this panel ASCII keeps it crisp at small sizes.
 
 4) Right before cv2.imshow (so the panel draws on top of everything else):
      frame = panel.draw(frame, state={
-         "targets": len(pipeline.targets),
+         "targets": len(pipeline.confirmed_targets),
+         "locked": number_currently_visible,
+         "selected": selected_target_id,
+         "fps": processing_fps,
+         "recording": recorder is not None,
          "paused": paused,
          "motion_comp": ENABLE_MOTION_COMPENSATION,
          "tiling": ENABLE_TILED_DETECTION,
@@ -58,8 +62,11 @@ class ControlPanel:
         ("N",   "ACQUIRE NEW TARGET"),
         ("A",   "ADD ANGLE TO SELECTED"),
         ("1-9", "SELECT TARGET"),
+        ("TAB", "CYCLE SELECTED TARGET"),
         ("X",   "DROP SELECTED TARGET"),
         ("P",   "PAUSE / RESUME (VIDEO)"),
+        ("S",   "SAVE SNAPSHOT"),
+        ("R",   "START / STOP RECORDING"),
         ("H",   "TOGGLE THIS PANEL"),
         ("Q",   "TERMINATE SESSION"),
     ]
@@ -137,13 +144,26 @@ class ControlPanel:
     @staticmethod
     def _status_rows(state: dict):
         targets = state.get("targets")
-        return [
-            ("TARGETS LOCKED", str(targets if targets is not None else "-"), bool(targets)),
+        locked = state.get("locked")
+        if targets is None:
+            targets_text = "-"
+        elif locked is None:
+            targets_text = str(targets)
+        else:
+            targets_text = f"{locked} / {targets}"
+        selected = state.get("selected")
+        fps = state.get("fps")
+        rows = [
+            ("TARGETS LOCKED", targets_text, bool(locked if locked is not None else targets)),
+            ("SELECTED", f"T{selected:02d}" if selected is not None else "NONE", selected is not None),
             ("SESSION", "PAUSED" if state.get("paused") else "ACTIVE", not state.get("paused")),
+            ("PROC FPS", f"{fps:.1f}" if fps is not None else "-", fps is not None and fps >= 5),
+            ("RECORDING", "REC" if state.get("recording") else "OFF", bool(state.get("recording"))),
             ("MOTION COMP", "ACTIVE" if state.get("motion_comp") else "STANDBY", bool(state.get("motion_comp"))),
             ("TILING", "ACTIVE" if state.get("tiling") else "STANDBY", bool(state.get("tiling"))),
             ("RANGE EST.", "ACTIVE" if state.get("distance") else "STANDBY", bool(state.get("distance"))),
         ]
+        return rows
 
     @staticmethod
     def _draw_keycap(frame, x, y, key: str):
@@ -163,9 +183,13 @@ class ControlPanel:
         """Semi-transparent dark panel with a thin border and viewfinder-
         style corner brackets, matching the tracking-box aesthetic used
         elsewhere in the app (see pipeline.py's corner-bracket boxes)."""
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (x0, y0), (x0 + w, y0 + h), _BG, -1)
-        frame = cv2.addWeighted(overlay, 0.78, frame, 0.22, 0)
+        fh, fw = frame.shape[:2]
+        rx1, ry1, rx2, ry2 = max(0, x0), max(0, y0), min(fw, x0 + w), min(fh, y0 + h)
+        if rx2 > rx1 and ry2 > ry1:
+            roi = frame[ry1:ry2, rx1:rx2]
+            fill = roi.copy()
+            fill[:] = _BG
+            cv2.addWeighted(fill, 0.78, roi, 0.22, 0, dst=roi)
 
         cv2.rectangle(frame, (x0, y0), (x0 + w, y0 + h), _BORDER, 1, cv2.LINE_AA)
 
