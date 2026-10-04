@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy to demo_videos.local.json (gitignored) and point these at your own footage. Relative paths are resolved from the project folder.",
+  "model": "models/yolov8m_visdrone.pt",
+  "db_logging": false,
+  "videos": [
+    {"name": "Aerial crowd (example)", "path": "data/videos/aerial_crowd.mp4"},
+    {"name": "Top-down, moving drone (example)", "path": "data/videos/topdown_flyover.mp4"}
+  ]
+}

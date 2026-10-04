@@ -21,3 +21,8 @@ Thumbs.db
 *.log
 
 .env
+
+snapshots/
+recordings/
+out/
+demo_videos.local.json
