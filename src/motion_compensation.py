@@ -70,6 +70,36 @@ class EgoMotionCompensator:
         small = cv2.resize(gray, (new_w, new_h), interpolation=cv2.INTER_AREA)
         return small, scale_factor
 
+    def estimate(self, frame_bgr: np.ndarray, target_boxes: list | None = None):
+        """
+        Camera-motion ESTIMATION only, no warping ("tracks" mode, see
+        MOTION_COMP_MODE in config.py).
+
+        Returns the affine (2x3, full-resolution pixels) that maps a point
+        in the PREVIOUS frame to where that same static-scene point appears
+        in THIS frame -- or None on the first frame / when the estimate is
+        unreliable. The pipeline applies it to every track's state instead
+        of warping the image, so a drone that is deliberately flying/panning
+        doesn't produce stretched border artifacts or a drifting coordinate
+        frame (the failure mode of step() on non-hovering footage).
+
+        target_boxes: previous frame's tracked boxes (excluded from corner
+        search, same as step()).
+        """
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        gray_small, scale_factor = self._downscale_for_estimation(gray)
+        prev_small = self._prev_gray_small
+        self._prev_gray_small = gray_small
+        self._prev_gray = None   # full-res copy is only needed by step()
+
+        if prev_small is None or prev_small.shape != gray_small.shape:
+            return None
+        mask = self._build_exclusion_mask(gray_small.shape[:2], target_boxes, scale_factor)
+        affine = self._estimate_affine(prev_small, gray_small, scale_factor, mask)
+        if affine is None or not self._is_plausible(affine):
+            return None
+        return affine
+
     def step(self, frame_bgr: np.ndarray, target_boxes: list | None = None):
         """
         Args:

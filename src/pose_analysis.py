@@ -90,24 +90,41 @@ class PoseAnalyzer:
         self.pose_model.to(self.device)
 
     def analyze(self, frame_bgr: np.ndarray, target_box) -> PoseResult | None:
-        x1, y1, x2, y2 = target_box
-        pad = 10
-        h, w = frame_bgr.shape[:2]
-        cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
-        cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
-        crop = frame_bgr[cy1:cy2, cx1:cx2]
-        if crop.size == 0:
-            return None
+        return self.analyze_batch(frame_bgr, [target_box])[0]
 
-        results = self.pose_model.predict(
-            crop, device=self.device, half=self.half, verbose=False
-        )[0]
+    def analyze_batch(self, frame_bgr: np.ndarray, target_boxes: list) -> list:
+        """One pose-model call for SEVERAL targets' crops (instead of one
+        call each -- with many targets due on the same frame, per-call
+        overhead dominated). Returns a PoseResult-or-None per input box."""
+        h, w = frame_bgr.shape[:2]
+        pad = 10
+        crops, offsets, slots = [], [], []
+        for i, (x1, y1, x2, y2) in enumerate(target_boxes):
+            cx1, cy1 = max(0, x1 - pad), max(0, y1 - pad)
+            cx2, cy2 = min(w, x2 + pad), min(h, y2 + pad)
+            crop = frame_bgr[cy1:cy2, cx1:cx2]
+            if crop.size == 0:
+                continue
+            crops.append(crop)
+            offsets.append((cx1, cy1))
+            slots.append(i)
+
+        out = [None] * len(target_boxes)
+        if not crops:
+            return out
+        predictions = self.pose_model.predict(
+            crops, device=self.device, half=self.half, verbose=False
+        )
+        for slot, offset, prediction in zip(slots, offsets, predictions):
+            out[slot] = self._result_from_prediction(frame_bgr, prediction, offset)
+        return out
+
+    def _result_from_prediction(self, frame_bgr, results, offset) -> PoseResult | None:
         if results.keypoints is None or len(results.keypoints) == 0:
             return None
 
         kpts_xy = results.keypoints.xy[0].cpu().numpy()      # (17, 2), crop-local coords
         kpts_conf = results.keypoints.conf[0].cpu().numpy()  # (17,)
-        offset = (cx1, cy1)
 
         result = PoseResult()
 
