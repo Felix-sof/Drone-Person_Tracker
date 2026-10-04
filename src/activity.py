@@ -48,20 +48,45 @@ class ActivityClassifier:
     def reset(self):
         self._history.clear()
 
-    def update(self, box) -> str:
+    def apply_camera_motion(self, affine) -> None:
+        """Re-express the stored positions in the current frame's
+        coordinates, so a moving drone's own motion isn't measured as the
+        target walking/running (a person standing still under a drone that
+        flies past would otherwise read as "running")."""
+        if not self._history:
+            return
+        a = affine
+        s = float(abs(a[0][0] * a[1][1] - a[0][1] * a[1][0])) ** 0.5
+        self._history = deque(
+            (t, a[0][0] * x + a[0][1] * y + a[0][2], a[1][0] * x + a[1][1] * y + a[1][2], h * s)
+            for t, x, y, h in self._history
+        )
+
+    def update(self, box, timestamp: float | None = None) -> str:
         """
         Args:
             box: (x1, y1, x2, y2) of the currently tracked target, or None
                  if the target isn't locked this frame.
+            timestamp: when this frame was captured, in seconds. For video
+                 files pass the VIDEO's own timestamp, not wall-clock time:
+                 if analysis runs slower than real time, wall-clock seconds
+                 stretch while the target's on-screen displacement doesn't,
+                 so a runner would read as "walking". None -> wall clock
+                 (correct for live sources).
 
         Returns:
             One of "unknown" (not enough data), "still", "walking", "running".
         """
-        now = time.monotonic()
+        now = time.monotonic() if timestamp is None else float(timestamp)
 
         if box is None:
             self.reset()
             return "unknown"
+
+        # Time went backwards (looping video, seek, switching clock source):
+        # old history is meaningless relative to the new timeline.
+        if self._history and now < self._history[-1][0]:
+            self.reset()
 
         x1, y1, x2, y2 = box
         cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0

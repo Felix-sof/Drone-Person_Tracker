@@ -26,6 +26,11 @@ ENABLE_TILED_DETECTION = True
 TILE_SIZE_PX = 640
 TILE_OVERLAP_RATIO = 0.2        # fraction of tile size overlapped between neighboring tiles
 TILING_NMS_IOU_THRESHOLD = 0.45  # merges duplicate detections found in overlap regions
+# Tiles are run through the detector this many at a time (one batched
+# call instead of one call per tile; on CUDA the tiles are also cut in GPU
+# memory). Lower it if you hit GPU out-of-memory on very large frames (a
+# 4K frame is ~32 tiles); raise it for fewer calls on a big GPU.
+TILE_BATCH_SIZE = 16
 
 # --- Re-ID (re-identification) ---
 # "resnet18"  -> general ImageNet backbone, no extra install, weaker matching.
@@ -34,6 +39,10 @@ TILING_NMS_IOU_THRESHOLD = 0.45  # merges duplicate detections found in overlap 
 REID_BACKEND = "osnet"
 REID_MATCH_THRESHOLD = 0.72    # cosine similarity above this = "same person" candidate
 REID_RESCAN_INTERVAL = 15      # re-run full Re-ID scan every N frames to recover from occlusion
+# How often (processed frames) LOST targets are searched for. Each search
+# embeds every unclaimed person in view -- in a crowd with the target cap
+# reached, doing that every frame was the largest Re-ID cost. 1 = every frame.
+REID_LOST_RESCAN_INTERVAL = 3
 # While the tracker is successfully following a target via IOU (not lost),
 # a periodic rescan can still find a DIFFERENT person who happens to score
 # slightly higher that frame (motion blur, pose, lighting) and incorrectly
@@ -42,6 +51,14 @@ REID_RESCAN_INTERVAL = 15      # re-run full Re-ID scan every N frames to recove
 # target's own current similarity by this margin before switching, so a
 # marginal/noisy difference can't override a target that's tracking fine.
 REID_SWITCH_MARGIN = 0.05
+# When IOU continuity fails for a locked target (fast mover, frame skipping,
+# or the very first frames before the motion model has learned a velocity),
+# detections whose center lies within this many target-box-heights of the
+# PREDICTED position are matched by Re-ID appearance instead, and treated
+# as a continuation of the same track (not a re-lock). Larger = more
+# forgiving of fast/erratic motion, but more chance of hopping to a similar-
+# looking neighbor in a crowd.
+REID_CONTINUATION_GATE_HEIGHTS = 1.5
 # Multi-shot reference gallery: instead of a single reference embedding,
 # you can capture several (e.g. front view, back view, side view) of the
 # same target -- a candidate is matched against whichever gallery shot it
@@ -83,6 +100,19 @@ ENABLE_AUTO_TRACK_ALL = True
 # create a duplicate ID for the same physical person -- this is what
 # prevents "the same person counted as two different targets".
 DUPLICATE_TARGET_SIMILARITY_THRESHOLD = 0.75
+# Auto-track-all only: a newly seen person is TENTATIVE (tracked silently,
+# no visible ID, no HUD panel, no DB row) until it has been matched in this
+# many consecutive processed frames. Filters out one-frame false positives
+# (bushes, shadows, a mis-fired tile) that would otherwise each burn an ID.
+# 1 = promote immediately (old behavior).
+AUTO_TARGET_MIN_HITS = 3
+# Auto-track-all only: a CONFIRMED auto target that has been completely
+# lost (not just coasting) for this many processed frames is dropped, so
+# people who left the scene stop occupying slots under
+# MAX_CONCURRENT_TARGETS. Without this, the cap fills up with long-gone
+# people and nobody new can ever be tracked. Manually added targets
+# (reference photo / 'n') never expire.
+LOST_TARGET_EXPIRY_FRAMES = 150
 
 # --- Activity / movement state ---
 # Classification is based on how far the tracked box's center moves per
@@ -174,6 +204,18 @@ EMOTION_MIN_FACE_SIZE_PX = 40    # skip analysis on tiny/low-res face crops
 # frame edges. Set this to False for panning/flying footage; keep it True
 # for footage from a roughly stationary hovering camera.
 ENABLE_MOTION_COMPENSATION = True
+# How the estimated camera motion is used:
+#   "tracks" (default) -- the image is NOT warped. Each frame's camera motion
+#       (previous -> current frame affine) is applied to every track's state
+#       instead: Kalman position/velocity, last box, trail and speed history
+#       (BoT-SORT-style "GMC"). Works for a drone that is flying, panning or
+#       climbing, not only hovering: no stretched border streaks, no drifting
+#       coordinate frame, and a person standing still under a moving drone
+#       correctly reads as "still" instead of "running". Also cheaper (no
+#       full-frame warpAffine).
+#   "warp" -- legacy video stabilization: warp every frame back toward a
+#       reference. Only suitable for a HOVERING camera (see note above).
+MOTION_COMP_MODE = "tracks"
 # Motion ESTIMATION (corner detection + optical flow) doesn't need full pixel
 # resolution to find a good camera transform -- goodFeaturesToTrack and
 # calcOpticalFlowPyrLK cost scales with pixel count, so estimating on a
@@ -221,8 +263,26 @@ SAFETY_CROP_PX = 4
 # --- Tracker (frame-to-frame continuity, IOU-based) ---
 TRACKER_IOU_THRESHOLD = 0.3
 TRACKER_MAX_MISSED_FRAMES = 10  # how many frames a track can go undetected before dropping
+# Each tracker runs a constant-velocity Kalman filter, so during those
+# missed frames the target "coasts" along its predicted path (drawn as a
+# thin bracket with a '?'), and IOU matching compares new detections
+# against where the target SHOULD be now rather than where it was last
+# seen -- this is what keeps fast movers and frame-skipped video locked.
+
+# --- Display ---
+ENABLE_TRAILS = True            # fading trajectory line behind each target
+TRAIL_LENGTH = 40               # points (processed frames) kept per trail
+HUD_MAX_PANELS = 4              # full HUD panels shown; the rest summarized as "+N MORE"
+SNAPSHOT_DIR = "snapshots"      # where the 's' key saves annotated frames
 
 # --- Runtime ---
+# Frames whose longer side exceeds this are downscaled before ANY processing
+# (detection, tracking, display, recording). A 4K frame is ~4x the pixels
+# of 1080p: with tiling that's ~32 detector tiles instead of ~8, for people
+# who are usually already big enough to detect at 1080p. Set to None to
+# process at native resolution (e.g. very high-altitude 4K footage where
+# people are only a few pixels tall).
+PROCESS_MAX_SIDE = 1920
 CAMERA_INDEX = 0                # 0 = default webcam
 FRAME_WIDTH = 960
 FRAME_HEIGHT = 540
@@ -276,4 +336,11 @@ DISTANCE_ESTIMATION_INTERVAL = 5   # frames; cheap (pure math), no need every fr
 # direction rather than implemented.
 HAND_OBJECT_FOREARM_EXCLUSION_MARGIN_PX = 10  # px buffer past the wrist before a shape counts as a candidate object instead of the forearm/sleeve itself
 
+# --- MySQL event logging ---
+# Credentials come from .env (MYSQL_HOST, MYSQL_PORT, MYSQL_USER,
+# MYSQL_PASSWORD, MYSQL_DATABASE). Inserts run on a background thread, so
+# an unreachable DB never stalls the video loop; the target_events table is
+# created automatically if it doesn't exist.
+ENABLE_DB_LOGGING = True
 DB_LOG_INTERVAL = 15  # her N karede bir MySQL'e yaz (performans icin)
+DB_RECONNECT_BACKOFF_S = 30  # baglanti basarisizsa en erken bu kadar saniye sonra tekrar dene
